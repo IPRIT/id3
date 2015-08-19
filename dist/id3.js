@@ -1,305 +1,16 @@
 /*
  * ID3 (v1/v2) Parser
- * 43081j
- * License: MIT, see LICENSE
  */
 
 (function() {
-	/*
-	 * lib/reader.js
-	 * Readers (local, ajax, file)
-	 */
-	var Reader = function(type) {
-		this.type = type || Reader.OPEN_URI;
-		this.size = null;
-		this.file = null;
-	};
-
-	Reader.OPEN_FILE = 1;
-	Reader.OPEN_URI = 2;
-	Reader.OPEN_LOCAL = 3;
-
-	if(typeof require === 'function') {
-		var fs = require('fs');
-	}
-
-	Reader.prototype.open = function(file, callback) {
-		this.file = file;
-		var self = this;
-		switch(this.type) {
-			case Reader.OPEN_LOCAL:
-				fs.stat(this.file, function(err, stat) {
-					if(err) {
-						return callback(err);
-					}
-					self.size = stat.size;
-					fs.open(self.file, 'r', function(err, fd) {
-						if(err) {
-							return callback(err);
-						}
-						self.fd = fd;
-						callback();
-					});
-				});
-			break;
-			case Reader.OPEN_FILE:
-				this.size = this.file.size;
-				callback();
-			break;
-			default:
-				this.ajax(
-					{
-						uri: this.file,
-						type: 'HEAD',
-					},
-					function(err, resp, xhr) {
-						if(err) {
-							return callback(err);
-						}
-						self.size = parseInt(xhr.getResponseHeader('Content-Length'));
-						callback();
-					}
-				);
-			break;
-		}
-	};
-
-	Reader.prototype.close = function() {
-		if(this.type === Reader.OPEN_LOCAL) {
-			fs.close(this.fd);
-		}
-	};
-
-	Reader.prototype.read = function(length, position, callback) {
-		if(typeof position === 'function') {
-			callback = position;
-			position = 0;
-		}
-		if(this.type === Reader.OPEN_LOCAL) {
-			this.readLocal(length, position, callback);
-		} else if(this.type === Reader.OPEN_FILE) {
-			this.readFile(length, position, callback);
-		} else {
-			this.readUri(length, position, callback);
-		}
-	};
-
-	Reader.prototype.readBlob = function(length, position, type, callback) {
-		if(typeof position === 'function') {
-			callback = position;
-			position = 0;
-		} else if(typeof type === 'function') {
-			callback = type;
-			type = 'application/octet-stream';
-		}
-		this.read(length, position, function(err, data) {
-			if(err) {
-				callback(err);
-				return;
-			}
-			callback(null, new Blob([data], {type: type}));
-		});
-	};
-
-	/*
-	 * Local reader
-	 */
-	Reader.prototype.readLocal = function(length, position, callback) {
-		var buffer = new Buffer(length);
-		fs.read(this.fd, buffer, 0, length, position, function(err, bytesRead, buffer) {
-			if(err) {
-				return callback(err);
-			}
-			var ab = new ArrayBuffer(buffer.length),
-				view = new Uint8Array(ab);
-			for(var i = 0; i < buffer.length; i++) {
-				view[i] = buffer[i];
-			}
-			callback(null, ab);
-		});
-	};
-
-	/*
-	 * URL reader
-	 */
-	Reader.prototype.ajax = function(opts, callback) {
-		var options = {
-			type: 'GET',
-			uri: null,
-			responseType: 'text'
-		};
-		if(typeof opts === 'string') {
-			opts = {uri: opts};
-		}
-		for(var k in opts) {
-			options[k] = opts[k];
-		}
-		var xhr = new XMLHttpRequest();
-		xhr.onreadystatechange = function() {
-			if(xhr.readyState !== 4) return;
-			if(xhr.status !== 200 && xhr.status !== 206) {
-				return callback('Received non-200/206 response (' + xhr.status + ')');
-			}
-			callback(null, xhr.response, xhr);
-		};
-		xhr.responseType = options.responseType;
-		xhr.open(options.type, options.uri, true);
-		if(options.range) {
-			options.range = [].concat(options.range);
-			if(options.range.length === 2) {
-				xhr.setRequestHeader('Range', 'bytes=' + options.range[0] + '-' + options.range[1]);
-			} else {
-				xhr.setRequestHeader('Range', 'bytes=' + options.range[0]);
-			}
-		}
-		xhr.send();
-	};
-
-	Reader.prototype.readUri = function(length, position, callback) {
-		this.ajax(
-			{
-				uri: this.file,
-				type: 'GET',
-				responseType: 'arraybuffer',
-				range: [position, position+length-1]
-			},
-			function(err, buffer) {
-				if(err) {
-					return callback(err);
-				}
-				return callback(null, buffer);
-			}
-		);
-	};
-
-	/*
-	 * File API reader
-	 */
-	Reader.prototype.readFile = function(length, position, callback) {
-		var slice = this.file.slice(position, position+length),
-			fr = new FileReader();
-		fr.onload = function(e) {
-			callback(null, e.target.result);
-		};
-		fr.onerror = function(e) {
-			callback('File read failed');
-		};
-		fr.readAsArrayBuffer(slice);
-	};
-
-	/*
-	 * lib/dataview-extra.js
-	 */
-	DataView.prototype.getString = function(length, offset, raw) {
-		offset = offset || 0;
-		length = length || (this.byteLength - offset);
-		if(length < 0) {
-			length += this.byteLength;
-		}
-		var str = '';
-		if(typeof Buffer !== 'undefined') {
-			var data = [];
-			for(var i = offset; i < (offset + length); i++) {
-				data.push(this.getUint8(i));
-			}
-			return (new Buffer(data)).toString();
-		} else {
-			for(var i = offset; i < (offset + length); i++) {
-				str += String.fromCharCode(this.getUint8(i));
-			}
-			if(raw) {
-				return str;
-			}
-			return decodeURIComponent(escape(str));
-		}
-	};
-
-	DataView.prototype.getStringUtf16 = function(length, offset, bom) {
-		offset = offset || 0;
-		length = length || (this.byteLength - offset);
-		var littleEndian = false,
-			str = '',
-			useBuffer = false;
-		if(typeof Buffer !== 'undefined') {
-			str = [];
-			useBuffer = true;
-		}
-		if(length < 0) {
-			length += this.byteLength;
-		}
-		if(bom) {
-			var bomInt = this.getUint16(offset);
-			if(bomInt === 0xFFFE) {
-				littleEndian = true;
-			}
-			offset += 2;
-			length -= 2;
-		}
-		for(var i = offset; i < (offset + length); i += 2) {
-			var ch = this.getUint16(i, littleEndian);
-			if((ch >= 0 && ch <= 0xD7FF) || (ch >= 0xE000 && ch <= 0xFFFF)) {
-				if(useBuffer) {
-					str.push(ch);
-				} else {
-					str += String.fromCharCode(ch);
-				}
-			} else if(ch >= 0x10000 && ch <= 0x10FFFF) {
-				ch -= 0x10000;
-				if(useBuffer) {
-					str.push(((0xFFC00 & ch) >> 10) + 0xD800);
-					str.push((0x3FF & ch) + 0xDC00);
-				} else {
-					str += String.fromCharCode(((0xFFC00 & ch) >> 10) + 0xD800) + String.fromCharCode((0x3FF & ch) + 0xDC00);
-				}
-			}
-		}
-		if(useBuffer) {
-			return (new Buffer(str)).toString();
-		} else {
-			return decodeURIComponent(escape(str));
-		}
-	};
-
-	DataView.prototype.getSynch = function(num) {
-		var out = 0,
-			mask = 0x7f000000;
-		while(mask) {
-			out >>= 1;
-			out |= num & mask;
-			mask >>= 8;
-		}
-		return out;
-	};
-
-	DataView.prototype.getUint8Synch = function(offset) {
-		return this.getSynch(this.getUint8(offset));
-	};
-
-	DataView.prototype.getUint32Synch = function(offset) {
-		return this.getSynch(this.getUint32(offset));
-	};
-
-	/*
-	 * Not really an int as such, but named for consistency
-	 */
-	DataView.prototype.getUint24 = function(offset, littleEndian) {
-		if(littleEndian) {
-			return this.getUint8(offset) + (this.getUint8(offset + 1) << 8) + (this.getUint8(offset + 2) << 16);
-		}
-		return this.getUint8(offset + 2) + (this.getUint8(offset + 1) << 8) + (this.getUint8(offset) << 16);
-	};
-
 	var id3 = function(opts, cb) {
-		/*
-		 * Initialise ID3
-		 */
 		var options = {
-			type: id3.OPEN_URI,
+			type: 'uri',
 		};
 		if(typeof opts === 'string') {
-			opts = {file: opts, type: id3.OPEN_URI};
+			opts = {file: opts, type: 'uri'};
 		} else if(typeof window !== 'undefined' && window.File && opts instanceof window.File) {
-			opts = {file: opts, type: id3.OPEN_FILE};
+			opts = {file: opts, type: 'file'};
 		}
 		for(var k in opts) {
 			options[k] = opts[k];
@@ -309,14 +20,15 @@
 			return cb('No file was set');
 		}
 
-		if(options.type === id3.OPEN_FILE) {
+		if(options.type === 'file') {
 			if(typeof window === 'undefined' || !window.File || !window.FileReader || typeof ArrayBuffer === 'undefined') {
 				return cb('Browser does not have support for the File API and/or ArrayBuffers');
 			}
-		} else if(options.type === id3.OPEN_LOCAL) {
+		} else if(options.type === 'local') {
 			if(typeof require !== 'function') {
 				return cb('Local paths may not be read within a browser');
 			}
+			var fs = require('fs');
 		} else {
 		}
 
@@ -477,6 +189,231 @@
 			'Rock/Pop'
 		];
 
+		/*
+		 * lib/reader.js
+		 * Readers (local, ajax, file)
+		 */
+		var Reader = function(type) {
+			this.type = type || 'uri';
+			this.size = null;
+			this.file = null;
+		};
+
+		Reader.prototype.open = function(file, callback) {
+			this.file = file;
+			var self = this;
+			if(this.type === 'local') {
+				fs.stat(this.file, function(err, stat) {
+					if(err) {
+						return callback(err);
+					}
+					self.size = stat.size;
+					fs.open(self.file, 'r', function(err, fd) {
+						if(err) {
+							return callback(err);
+						}
+						self.fd = fd;
+						callback();
+					});
+				});
+			} else if(this.type === 'file') {
+				this.size = this.file.size;
+				callback();
+			} else {
+				this.ajax(
+					{
+						uri: this.file,
+						type: 'HEAD',
+					},
+					function(err, resp, xhr) {
+						if(err) {
+							return callback(err);
+						}
+						self.size = parseInt(xhr.getResponseHeader('Content-Length'));
+						callback();
+					}
+				);
+			}
+		};
+
+		Reader.prototype.close = function() {
+			if(this.type === 'local') {
+				fs.close(this.fd);
+			}
+		};
+
+		Reader.prototype.read = function(length, position, callback) {
+			if(this.type === 'local') {
+				this.readPath(length, position, callback);
+			} else if(this.type === 'file') {
+				this.readFile(length, position, callback);
+			} else {
+				this.readUri(length, position, callback);
+			}
+		};
+
+		/*
+		 * Local reader
+		 */
+		Reader.prototype.readPath = function(length, position, callback) {
+			var buffer = new Buffer(length);
+			fs.read(this.fd, buffer, 0, length, position, function(err, bytesRead, buffer) {
+				if(err) {
+					return callback(err);
+				}
+				var ab = new ArrayBuffer(buffer.length),
+					view = new Uint8Array(ab);
+				for(var i = 0; i < buffer.length; i++) {
+					view[i] = buffer[i];
+				}
+				callback(null, ab);
+			});
+		};
+
+		/*
+		 * URL reader
+		 */
+		Reader.prototype.ajax = function(opts, callback) {
+			var options = {
+				type: 'GET',
+				uri: null,
+				responseType: 'text'
+			};
+			if(typeof opts === 'string') {
+				opts = {uri: opts};
+			}
+			for(var k in opts) {
+				options[k] = opts[k];
+			}
+			var xhr = new XMLHttpRequest();
+			xhr.onreadystatechange = function() {
+				if(xhr.readyState !== 4) return;
+				if(xhr.status !== 200 && xhr.status !== 206) {
+					return callback('Received non-200/206 response (' + xhr.status + ')');
+				}
+				callback(null, xhr.response, xhr);
+			};
+			xhr.responseType = options.responseType;
+			xhr.open(options.type, options.uri, true);
+			if(options.range) {
+				options.range = [].concat(options.range);
+				if(options.range.length === 2) {
+					xhr.setRequestHeader('Range', 'bytes=' + options.range[0] + '-' + options.range[1]);
+				} else {
+					xhr.setRequestHeader('Range', 'bytes=' + options.range[0]);
+				}
+			}
+			xhr.send();
+		};
+
+		Reader.prototype.readUri = function(length, position, callback) {
+			this.ajax(
+				{
+					uri: this.file,
+					type: 'GET',
+					responseType: 'arraybuffer',
+					range: [position, position+length-1]
+				},
+				function(err, buffer) {
+					if(err) {
+						return callback(err);
+					}
+					return callback(null, buffer);
+				}
+			);
+		};
+
+		/*
+		 * File API reader
+		 */
+		Reader.prototype.readFile = function(length, position, callback) {
+			var slice = this.file.slice(position, position+length),
+				fr = new FileReader();
+			fr.onload = function(e) {
+				callback(null, e.target.result);
+			};
+			fr.onerror = function(e) {
+				callback('File read failed');
+			};
+			fr.readAsArrayBuffer(slice);
+		};
+
+		/*
+		 * lib/dataview.js
+		 * Uint8 to String
+		 */
+
+		DataView.prototype.getString = function(length, offset, raw) {
+			offset = offset || 0;
+			length = length || (this.byteLength - offset);
+			if(length < 0) {
+				length += this.byteLength;
+			}
+			var str = '';
+			for(var i = offset; i < (offset + length); i++) {
+				str += String.fromCharCode(this.getUint8(i));
+			}
+			if(raw) {
+				return str;
+			}
+			var dec = '';
+			try {
+				dec = decodeURIComponent(escape(str));
+			} catch (e) {}
+			return dec;
+		};
+
+		DataView.prototype.getStringUtf16 = function(length, offset, bom) {
+			offset = offset || 0;
+			length = length || (this.byteLength - offset);
+			var littleEndian = false,
+				str = '';
+			if(length < 0) {
+				length += this.byteLength;
+			}
+			if(bom) {
+				var bomInt = this.getUint16(offset);
+				if(bomInt === 0xFFFE) {
+					littleEndian = true;
+				}
+				offset += 2;
+				length -= 2;
+			}
+			for(var i = offset; i < (offset + length); i += 2) {
+				var ch = this.getUint16(i, littleEndian);
+				if((ch >= 0 && ch <= 0xD7FF) || (ch >= 0xE000 && ch <= 0xFFFF)) {
+					str += String.fromCharCode(ch);
+				} else if(ch >= 0x10000 && ch <= 0x10FFFF) {
+					ch -= 0x10000;
+					str += String.fromCharCode(((0xFFC00 & ch) >> 10) + 0xD800) + String.fromCharCode((0x3FF & ch) + 0xDC00);
+				}
+			}
+			var dec = '';
+			try {
+				dec = decodeURIComponent(escape(str));
+			} catch (e) {}
+			return dec;
+		};
+
+		DataView.prototype.getSynch = function(num) {
+			var out = 0,
+				mask = 0x7f000000;
+			while(mask) {
+				out >>= 1;
+				out |= num & mask;
+				mask >>= 8;
+			}
+			return out;
+		};
+
+		DataView.prototype.getUint32Synch = function(offset) {
+			return this.getSynch(this.getUint32(offset));
+		};
+
+		DataView.prototype.getUint24 = function(offset) {
+			return this.getUint8(offset + 2) + (this.getUint8(offset + 1) << 8) + (this.getUint8(offset) << 16);
+		};
+
 
 		/*
 		 * lib/id3frame.js
@@ -598,7 +535,7 @@
 			 */
 			'APIC': 'image',
 			'PIC': 'image',
-			
+
 			'PRIV': 'private'
 		};
 
@@ -660,7 +597,9 @@
 			}
 			result.tag = ID3Frame.types[header.id];
 			if(header.type === 'T') {
-				var encoding = dv.getUint8(10);
+				try {
+					var encoding = dv.getUint8(10);
+				} catch (e) {}
 				/*
 				 * TODO: Implement UTF-8, UTF-16 and UTF-16 with BOM properly?
 				 */
@@ -728,7 +667,7 @@
 				image.mime = dv.getString(variableLength, variableStart);
 				image.type = ID3Frame.imageTypes[dv.getUint8(variableStart + variableLength + 1)] || 'other';
 				variableStart += variableLength + 2;
-				var variableLength = 0;
+				variableLength = 0;
 				for(var i = variableStart;; i++) {
 					if(dv.getUint8(i) === 0x00) {
 						variableLength = i - variableStart;
@@ -738,8 +677,7 @@
 				image.description = (variableLength === 0 ? null : dv.getString(variableLength, variableStart));
 				image.data = buffer.slice(variableStart + 1);
 				result.value = image;
-			}
-			else if(header.id === 'PRIV') {
+			} else if(header.id === 'PRIV') {
 				var privFrame = {
 					description: null,
 					data: null
@@ -747,7 +685,7 @@
 
 				var variableStart = 10;
 				var variableLength = 0;
-				
+
 				for (var i = variableStart;; i++) {
 
 					if (dv.getUint8(i) === 0x00) {
@@ -759,14 +697,13 @@
 
 				privFrame.description = (variableLength === 0 ? null : dv.getString(variableLength, variableStart));
 				privFrame.data = buffer.slice(variableLength + variableStart +1);
-				
+
 //					tags.v2[frame.tag] = frame.value;
 
 				result.value = privFrame;
 			}
 			return (result.tag ? result : false);
 		};
-
 
 		/*
 		 * ID3v2.2 and earlier
@@ -877,10 +814,10 @@
 					processed.v1 = true;
 					return process();
 				}
-				tags.v1.title  = dv.getString(30,  3).replace(/(^\s+|\s+$)/, '') || null;
+				tags.v1.title = dv.getString(30, 3).replace(/(^\s+|\s+$)/, '') || null;
 				tags.v1.artist = dv.getString(30, 33).replace(/(^\s+|\s+$)/, '') || null;
-				tags.v1.album  = dv.getString(30, 63).replace(/(^\s+|\s+$)/, '') || null;
-				tags.v1.year   = dv.getString(4 , 93).replace(/(^\s+|\s+$)/, '') || null;
+				tags.v1.album = dv.getString(30, 63).replace(/(^\s+|\s+$)/, '') || null;
+				tags.v1.year = dv.getString(4, 93).replace(/(^\s+|\s+$)/, '') || null;
 				/*
 				 * If there is a zero byte at [125], the comment is 28 bytes and the remaining 2 are [0, trackno]
 				 */
@@ -970,7 +907,6 @@
 						} else if(tags.v2.version[0] === 4) {
 							slice = buffer.slice(position, position + 10 + dv.getUint32Synch(position + 4));
 						}
-						
 						frame = ID3Frame.parse(slice, tags.v2.version[0]);
 						if(frame) {
 							tags.v2[frame.tag] = frame.value;
@@ -995,16 +931,10 @@
 			}
 			ID3Tag.parse(handle, function(err, tags) {
 				cb(err, tags);
-				handle.close();
 			});
 		});
 	};
-
-	id3.OPEN_FILE = Reader.OPEN_FILE;
-	id3.OPEN_URI = Reader.OPEN_URI;
-	id3.OPEN_LOCAL = Reader.OPEN_LOCAL;
-
-	if(typeof module !== 'undefined' && module.exports) {
+	if (typeof module !== 'undefined' && module.exports) {
 		module.exports = id3;
 	} else {
 		if(typeof define === 'function' && define.amd) {
