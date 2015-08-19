@@ -5,7 +5,7 @@
 (function() {
 	var id3 = function(opts, cb) {
 		var options = {
-			type: 'uri',
+			type: 'uri'
 		};
 		if(typeof opts === 'string') {
 			opts = {file: opts, type: 'uri'};
@@ -223,7 +223,7 @@
 				this.ajax(
 					{
 						uri: this.file,
-						type: 'HEAD',
+						type: 'HEAD'
 					},
 					function(err, resp, xhr) {
 						if(err) {
